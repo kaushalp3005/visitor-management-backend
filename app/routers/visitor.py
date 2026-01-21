@@ -28,6 +28,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/visitors", tags=["Visitors"])
 
+def _find_approver_for_notification(db: Session, person_to_meet: str) -> Optional[Approver]:
+    """Find approver by username or name (case-insensitive, trimmed)."""
+    if not person_to_meet:
+        return None
+    key = person_to_meet.strip()
+    if not key:
+        return None
+    return db.query(Approver).filter(
+        (Approver.username.ilike(key)) |
+        (Approver.name.ilike(key))
+    ).first()
+
+def _get_superuser_phone_numbers(db: Session) -> List[str]:
+    """Return all configured superuser phone numbers (deduped)."""
+    superusers = db.query(Approver).filter(
+        Approver.superuser == True,  # noqa: E712
+        Approver.is_active == True,  # noqa: E712
+        Approver.ph_no.isnot(None),
+        Approver.ph_no != "",
+    ).all()
+    phones = []
+    for s in superusers:
+        if s.ph_no and s.ph_no not in phones:
+            phones.append(s.ph_no)
+    return phones
+
 
 def enrich_visitor_with_contact(visitor: Visitor, db: Session) -> dict:
     """
@@ -206,26 +232,36 @@ def check_in_visitor(
             db_session = SessionLocal()
             try:
                 approver = db_session.query(Approver).filter(
-                    (Approver.username == person_to_meet) | 
-                    (Approver.name == person_to_meet)
+                    (Approver.username.ilike(person_to_meet.strip())) |
+                    (Approver.name.ilike(person_to_meet.strip()))
                 ).first()
                 
+                # Always notify superusers as well (they should see all SMS)
+                superuser_phones = _get_superuser_phone_numbers(db_session)
+                target_phones: List[str] = []
                 if approver and approver.ph_no:
-                    sms_sent = sms_service.send_visitor_notification(
-                        to_phone=approver.ph_no,
-                        visitor_name=visitor_name,
-                        visitor_mobile=mobile,
-                        visitor_email=email,
-                        visitor_company=company,
-                        reason_for_visit=reason,
-                        visitor_id=str(visitor_id),
-                        warehouse=warehouse,
-                        person_to_meet_name=approver.name
-                    )
-                    if sms_sent:
-                        logger.info(f"SMS notification sent to {approver.ph_no} for visitor {visitor_id}")
-                    else:
-                        logger.warning(f"Failed to send SMS notification to {approver.ph_no}")
+                    target_phones.append(approver.ph_no)
+                for p in superuser_phones:
+                    if p not in target_phones:
+                        target_phones.append(p)
+
+                if target_phones:
+                    for to_phone in target_phones:
+                        sms_sent = sms_service.send_visitor_notification(
+                            to_phone=to_phone,
+                            visitor_name=visitor_name,
+                            visitor_mobile=mobile,
+                            visitor_email=email,
+                            visitor_company=company,
+                            reason_for_visit=reason,
+                            visitor_id=str(visitor_id),
+                            warehouse=warehouse,
+                            person_to_meet_name=approver.name if approver else person_to_meet,
+                        )
+                        if sms_sent:
+                            logger.info(f"SMS notification sent to {to_phone} for visitor {visitor_id}")
+                        else:
+                            logger.warning(f"Failed to send SMS notification to {to_phone}")
                 else:
                     logger.warning(f"Approver '{person_to_meet}' not found or has no phone number. SMS not sent.")
             finally:
@@ -365,31 +401,38 @@ async def check_in_visitor_with_image(
     # Note: In Lambda, BackgroundTasks don't work as expected. We'll do a quick synchronous send with timeout.
     try:
         logger.info(f"[SMS] Searching for approver: {person_to_meet}")
-        approver = db.query(Approver).filter(
-            (Approver.username == person_to_meet) | 
-            (Approver.name == person_to_meet)
-        ).first()
+        approver = _find_approver_for_notification(db, person_to_meet)
         
+        # Always notify superusers as well (they should see all SMS)
+        superuser_phones = _get_superuser_phone_numbers(db)
+        target_phones: List[str] = []
         if approver and approver.ph_no:
-            logger.info(f"[SMS] Sending SMS to {approver.ph_no}")
-            # SMS service already has 10s timeout - this won't block long
-            sms_sent = sms_service.send_visitor_notification(
-                to_phone=approver.ph_no,
-                visitor_name=visitor_name,
-                visitor_mobile=mobile_number,
-                visitor_email=email_address,
-                visitor_company=company,
-                reason_for_visit=reason_to_visit,
-                visitor_id=str(new_visitor.id),
-                warehouse=warehouse,
-                person_to_meet_name=approver.name,
-                date_of_visit=date_of_visit,
-                time_slot=time_slot
-            )
-            if sms_sent:
-                logger.info(f"[SMS] ✓ SMS sent to {approver.ph_no}")
-            else:
-                logger.warning(f"[SMS] ✗ SMS failed to {approver.ph_no}")
+            target_phones.append(approver.ph_no)
+        for p in superuser_phones:
+            if p not in target_phones:
+                target_phones.append(p)
+
+        if target_phones:
+            for to_phone in target_phones:
+                logger.info(f"[SMS] Sending SMS to {to_phone}")
+                # SMS service already has 10s timeout - this won't block long
+                sms_sent = sms_service.send_visitor_notification(
+                    to_phone=to_phone,
+                    visitor_name=visitor_name,
+                    visitor_mobile=mobile_number,
+                    visitor_email=email_address,
+                    visitor_company=company,
+                    reason_for_visit=reason_to_visit,
+                    visitor_id=str(new_visitor.id),
+                    warehouse=warehouse,
+                    person_to_meet_name=approver.name if approver else person_to_meet,
+                    date_of_visit=date_of_visit,
+                    time_slot=time_slot,
+                )
+                if sms_sent:
+                    logger.info(f"[SMS] ✓ SMS sent to {to_phone}")
+                else:
+                    logger.warning(f"[SMS] ✗ SMS failed to {to_phone}")
         else:
             logger.warning(f"[SMS] Approver '{person_to_meet}' not found or has no phone number")
     except Exception as e:
@@ -935,6 +978,18 @@ def google_form_submission(
     Returns:
         Created visitor information with check-in details
     """
+    # Explicit terminal prints (helpful on some hosts where logging is buffered/filtered)
+    print("=" * 80, flush=True)
+    print("[Google Form] NEW APPOINTMENT REQUEST RECEIVED", flush=True)
+    print(f"[Google Form] Visitor Name: {form_data.visitor_name}", flush=True)
+    print(f"[Google Form] Mobile Number: {form_data.mobile}", flush=True)
+    print(f"[Google Form] Email Address: {form_data.email}", flush=True)
+    print(f"[Google Form] Company: {form_data.company}", flush=True)
+    print(f"[Google Form] Person to Meet: {form_data.host_name}", flush=True)
+    print(f"[Google Form] Purpose of Visit: {form_data.purpose}", flush=True)
+    print(f"[Google Form] Preferred Time Slot: {form_data.preferred_time_slot}", flush=True)
+    print("=" * 80, flush=True)
+
     logger.info("=" * 80)
     logger.info("[Google Form] ========== NEW APPOINTMENT REQUEST RECEIVED ==========")
     logger.info("=" * 80)
@@ -1158,6 +1213,7 @@ def google_form_submission(
             )
     
     logger.info(f"[Google Form] Final match: {approver.username} (name: {approver.name})")
+    print(f"[Google Form] Matched Approver: {approver.name} ({approver.username})", flush=True)
     
     # Create VisitorCheckIn object from Google Form data
     visitor_data = VisitorCheckIn(
@@ -1208,12 +1264,14 @@ def google_form_submission(
     db.refresh(new_visitor)
 
     logger.info(f"[Google Form] Visitor record created successfully!")
+    print(f"[Google Form] Visitor record created successfully! id={new_visitor.id}", flush=True)
     logger.info(f"[Google Form] Visitor ID: {new_visitor.id}")
     logger.info(f"[Google Form] Visitor Number: {new_visitor.check_in_time.strftime('%Y%m%d%H%M%S')}")
     logger.info(f"[Google Form] Status: {new_visitor.status}")
     logger.info(f"[Google Form] Matched Approver: {approver.name} (Username: {approver.username})")
     logger.info(f"[Google Form] Approver Phone: {approver.ph_no if approver.ph_no else 'Not available'}")
     logger.info("=" * 80)
+    print(f"[Google Form] Approver Phone: {approver.ph_no if approver.ph_no else 'Not available'}", flush=True)
 
     # Enrich with contact information
     visitor_response = enrich_visitor_with_contact(new_visitor, db)
@@ -1230,34 +1288,40 @@ def google_form_submission(
             db_session = SessionLocal()
             try:
                 logger.info(f"[SMS] Searching for approver with username or name: {person_to_meet}")
-                approver = db_session.query(Approver).filter(
-                    (Approver.username == person_to_meet) | 
-                    (Approver.name == person_to_meet)
-                ).first()
+                approver = _find_approver_for_notification(db_session, person_to_meet)
                 
                 if approver:
                     logger.info(f"[SMS] Found approver: {approver.username} (name: {approver.name}), phone: {approver.ph_no}")
+                    superuser_phones = _get_superuser_phone_numbers(db_session)
+                    target_phones: List[str] = []
                     if approver.ph_no:
-                        logger.info(f"[SMS] Attempting to send SMS to {approver.ph_no}")
-                        sms_sent = sms_service.send_visitor_notification(
-                            to_phone=approver.ph_no,
-                            visitor_name=visitor_name,
-                            visitor_mobile=mobile,
-                            visitor_email=email,
-                            visitor_company=company,
-                            reason_for_visit=reason,
-                            visitor_id=str(visitor_id),
-                            warehouse=warehouse,
-                            person_to_meet_name=approver.name,
-                            date_of_visit=date_of_visit,
-                            time_slot=time_slot
-                        )
-                        if sms_sent:
-                            logger.info(f"[SMS] ✓ SMS notification sent successfully to {approver.ph_no} for visitor {visitor_id}")
-                        else:
-                            logger.warning(f"[SMS] ✗ Failed to send SMS notification to {approver.ph_no} for visitor {visitor_id}")
+                        target_phones.append(approver.ph_no)
+                    for p in superuser_phones:
+                        if p not in target_phones:
+                            target_phones.append(p)
+
+                    if target_phones:
+                        for to_phone in target_phones:
+                            logger.info(f"[SMS] Attempting to send SMS to {to_phone}")
+                            sms_sent = sms_service.send_visitor_notification(
+                                to_phone=to_phone,
+                                visitor_name=visitor_name,
+                                visitor_mobile=mobile,
+                                visitor_email=email,
+                                visitor_company=company,
+                                reason_for_visit=reason,
+                                visitor_id=str(visitor_id),
+                                warehouse=warehouse,
+                                person_to_meet_name=approver.name,
+                                date_of_visit=date_of_visit,
+                                time_slot=time_slot,
+                            )
+                            if sms_sent:
+                                logger.info(f"[SMS] ✓ SMS notification sent successfully to {to_phone} for visitor {visitor_id}")
+                            else:
+                                logger.warning(f"[SMS] ✗ Failed to send SMS notification to {to_phone} for visitor {visitor_id}")
                     else:
-                        logger.warning(f"[SMS] Approver '{person_to_meet}' found but has no phone number (ph_no is None/empty)")
+                        logger.warning(f"[SMS] Approver '{person_to_meet}' found but has no phone number, and no superuser phones configured")
                 else:
                     logger.warning(f"[SMS] Approver '{person_to_meet}' not found in database. SMS not sent.")
                     all_approvers = db_session.query(Approver).all()
