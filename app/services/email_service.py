@@ -1,5 +1,5 @@
 """
-Email Service
+Email Services
 Handles sending emails for appointment QR codes
 """
 import logging
@@ -18,9 +18,11 @@ logger = logging.getLogger(__name__)
 class EmailService:
     def __init__(self):
         self.enabled = settings.email_enabled
-        self.smtp_host = settings.smtp_server
+        # Support both SMTP_SERVER and SMTP_HOST style config
+        self.smtp_host = getattr(settings, "smtp_server", None) or getattr(settings, "smtp_host", None)
         self.smtp_port = settings.smtp_port
-        self.smtp_user = settings.smtp_username
+        # Support both SMTP_USERNAME and SMTP_USER style config
+        self.smtp_user = getattr(settings, "smtp_username", None) or getattr(settings, "smtp_user", None)
         self.smtp_password = settings.smtp_password
         self.from_email = settings.email_from
         
@@ -68,8 +70,15 @@ class EmailService:
             logger.warning("Email service is disabled. Set EMAIL_ENABLED=true to enable.")
             return False
             
+        if not self.smtp_host or not self.smtp_port:
+            logger.warning(f"SMTP host/port not configured (host={self.smtp_host}, port={self.smtp_port}). Email not sent.")
+            return False
+
         if not self.smtp_user or not self.smtp_password:
-            logger.warning("SMTP credentials not configured. Email not sent.")
+            # Don't log passwords; just indicate what's missing.
+            logger.warning(
+                f"SMTP credentials not configured (user_set={bool(self.smtp_user)}, password_set={bool(self.smtp_password)}). Email not sent."
+            )
             return False
         
         try:
@@ -254,8 +263,14 @@ class EmailService:
             logger.warning("Email service is disabled. Set EMAIL_ENABLED=true to enable.")
             return False
             
+        if not self.smtp_host or not self.smtp_port:
+            logger.warning(f"SMTP host/port not configured (host={self.smtp_host}, port={self.smtp_port}). Email not sent.")
+            return False
+
         if not self.smtp_user or not self.smtp_password:
-            logger.warning("SMTP credentials not configured. Email not sent.")
+            logger.warning(
+                f"SMTP credentials not configured (user_set={bool(self.smtp_user)}, password_set={bool(self.smtp_password)}). Email not sent."
+            )
             return False
         
         try:
