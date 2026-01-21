@@ -5,6 +5,7 @@ from typing import Optional
 import logging
 from twilio.rest import Client
 from twilio.base.exceptions import TwilioException
+from twilio.http.http_client import TwilioHttpClient
 
 from app.core.config import settings
 
@@ -23,11 +24,13 @@ class SMSService:
         
         if self.enabled and settings.twilio_account_sid and settings.twilio_auth_token:
             try:
-                # Initialize with timeout to prevent hanging requests
+                # Twilio's Client does not support a `timeout=` kwarg in many SDK versions.
+                # Configure timeouts via the underlying HTTP client instead.
+                http_client = TwilioHttpClient(timeout=10)  # seconds
                 self.client = Client(
                     settings.twilio_account_sid,
                     settings.twilio_auth_token,
-                    timeout=10  # 10 second timeout for Twilio API calls
+                    http_client=http_client,
                 )
                 logger.info("Twilio SMS client initialized successfully")
             except Exception as e:
