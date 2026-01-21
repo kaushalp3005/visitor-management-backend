@@ -1,16 +1,14 @@
 """
 Visitor Management System API
-Main application file
+Main application file hai
 """
 
 from fastapi import FastAPI, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-import asyncio
 import logging
 import os
 import uvicorn
-import requests
 
 from app.core.config import settings
 from app.core.database import engine, Base, get_db
@@ -28,62 +26,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# Periodic Health Ping (Render keep-alive)
-# ============================================================================
-
-HEALTH_PING_URL = "https://visitor-management-backend-2hof.onrender.com/health"
-HEALTH_PING_INTERVAL_SECONDS = 5 * 60  # 5 minutes
-HEALTH_PING_TIMEOUT_SECONDS = 10
-
-_health_ping_stop_event: asyncio.Event | None = None
-_health_ping_task: asyncio.Task | None = None
-
-
-async def _ping_health_endpoint() -> None:
-    """Send a single health ping without blocking the event loop."""
-    def _do_request() -> tuple[int | None, str | None]:
-        try:
-            resp = requests.get(HEALTH_PING_URL, timeout=HEALTH_PING_TIMEOUT_SECONDS)
-            return resp.status_code, resp.text[:200] if resp.text else ""
-        except Exception as e:
-            return None, str(e)
-
-    status, info = await asyncio.to_thread(_do_request)
-    if status is None:
-        logger.warning(f"Health ping failed: {info}")
-    else:
-        logger.info(f"Health ping ok: {status}")
-
-
-async def _health_ping_loop() -> None:
-    """Background task: ping health URL every 5 minutes until stopped."""
-    assert _health_ping_stop_event is not None
-
-    # Small initial delay so startup can finish cleanly
-    try:
-        await asyncio.wait_for(_health_ping_stop_event.wait(), timeout=5)
-        return
-    except asyncio.TimeoutError:
-        pass
-
-    while not _health_ping_stop_event.is_set():
-        await _ping_health_endpoint()
-        try:
-            await asyncio.wait_for(
-                _health_ping_stop_event.wait(),
-                timeout=HEALTH_PING_INTERVAL_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            continue
-
-
-# ============================================================================
 # FastAPI Application
 # ============================================================================
-
-# Disable docs in production for Lambda compatibility
-docs_url = "/docs" if settings.ENVIRONMENT != "production" else None
-redoc_url = "/redoc" if settings.ENVIRONMENT != "production" else None
 
 app = FastAPI(
     title="Visitor Management System API",
@@ -96,8 +40,6 @@ app = FastAPI(
     license_info={
         "name": "Proprietary",
     },
-    docs_url=docs_url,
-    redoc_url=redoc_url,
 )
 
 # ============================================================================
@@ -159,37 +101,20 @@ def root():
 @app.get("/health", tags=["Health"])
 def health_check():
     """Health check endpoint for API monitoring"""
-    try:
-        return {
-            "status": "ok",
-            "message": "Visitor Management System API is running",
-            "version": "1.0.0",
-            "environment": getattr(settings, 'ENVIRONMENT', 'unknown'),
-            "timestamp": str(__import__('datetime').datetime.utcnow())
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Health check failed: {str(e)}",
-            "version": "1.0.0"
-        }
+    return {
+        "status": "ok",
+        "message": "Visitor Management System API is running",
+        "version": "1.0.0"
+    }
 
 @app.get("/api/health", tags=["Health"])
 def api_health():
     """Health check endpoint (alternative path)"""
-    try:
-        return {
-            "status": "ok",
-            "message": "Visitor Management System API is running",
-            "version": "1.0.0",
-            "environment": getattr(settings, 'ENVIRONMENT', 'unknown')
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"API health check failed: {str(e)}",
-            "version": "1.0.0"
-        }
+    return {
+        "status": "ok",
+        "message": "Visitor Management System API is running",
+        "version": "1.0.0"
+    }
 
 # ============================================================================
 # Event Handlers
@@ -216,30 +141,12 @@ async def startup_event():
         logger.error(f"✗ Database initialization failed: {e}")
         logger.warning("Application will continue, but database operations may fail")
 
-    # Start periodic health pings (keep-alive) in the background
-    global _health_ping_stop_event, _health_ping_task
-    _health_ping_stop_event = asyncio.Event()
-    _health_ping_task = asyncio.create_task(_health_ping_loop())
-
 @app.on_event("shutdown")
 async def shutdown_event():
     """Actions to perform on application shutdown"""
     logger.info("=" * 60)
     logger.info("Shutting down Visitor Management System API")
     logger.info("=" * 60)
-
-    # Stop periodic health pings
-    global _health_ping_stop_event, _health_ping_task
-    if _health_ping_stop_event is not None:
-        _health_ping_stop_event.set()
-    if _health_ping_task is not None:
-        try:
-            await asyncio.wait_for(_health_ping_task, timeout=5)
-        except asyncio.TimeoutError:
-            _health_ping_task.cancel()
-        except Exception:
-            # Don't block shutdown on ping loop issues
-            pass
 
 # ============================================================================
 # Router Registration
@@ -266,12 +173,16 @@ def google_form_root_endpoint(
 
 logger.info("All routers registered successfully")
 
+# ============================================================================
+# Application Entry Point
+# ============================================================================
+
 if __name__ == "__main__":
     is_dev = settings.ENVIRONMENT != "production"
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(
         # Use import string so reload/workers work correctly (and avoid warnings).
-        "main:app",
+        "app.main:app",
         host="0.0.0.0",
         port=port,
         reload=is_dev,
